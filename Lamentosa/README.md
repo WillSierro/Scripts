@@ -1,22 +1,20 @@
-# Lamentosa Userscripts
-
-Esta pasta esta focada apenas em scripts para Tampermonkey no Lamentosa.
+# Userscripts
 
 ## Scripts
 
-- `lamentosa_boss_auto.user.js`
+- `Boss_Auto.user.js`
   Monitora a janela do boss, le o chat pela categoria/tag configurada, abre o boss, clica em `Desafiar` e depois no botao final da janela.
 
-- `lamentosa_boss_join.user.js`
+- `Boss_Join.user.js`
   Le o chat para achar o boss configurado, abre o boss e tenta clicar em `Entrar` seguindo a regra de repeticoes e a janela do timer.
 
-- `lamentosa_auto_heal.user.js`
+- `Auto_Heal.user.js`
   E o curador principal. Se a vida nao estiver cheia, ele espera `Finished/Terminado` quando voce estiver em boss/dungeon, vai ao templo e usa ate `2x` a cura de `50%`.
 
-- `lamentosa_dungeon_test.user.js`
+- `Dungeon_Test.user.js`
   Observa o chat global e reage apenas quando `TheVamp` ou `Nuvem` abrirem `DUNGEON`. Faz alerta sonoro/falado, envia Telegram e clica no link da dungeon.
 
-- `lamentosa_connection_guard.user.js`
+- `Connection_Guard.user.js`
   Detecta `Connection lost. Please refresh the page.` e recarrega a pagina automaticamente com cooldown para evitar loop.
 
 ## Controles visuais
