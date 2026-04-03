@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         Lamentosa Boss Auto
 // @namespace    codex.lamentosa
-// @version      1.3.7
+// @version      1.3.8
 // @description  Monitora o chat do boss, clica no boss, em Desafiar e depois no OK.
 // @match        *://*/*
 // @run-at       document-idle
@@ -936,6 +936,54 @@
     return candidates.filter((anchor, index, all) => anchor && all.indexOf(anchor) === index);
   }
 
+  function findBossChatMessageAnchor(keyword, ignoredKeys, chatList) {
+    if (!chatList) {
+      return null;
+    }
+
+    const keywordNorm = normalize(keyword);
+    const messageNodes = Array.from(
+      chatList.querySelectorAll("li.system, #gChatList > li, #drawerChat #gChatList > li")
+    );
+
+    for (let index = messageNodes.length - 1; index >= 0; index -= 1) {
+      const node = messageNodes[index];
+      const anchor =
+        node.querySelector(".gc-in-msg a[hx-get*='/boss/'], .gc-in-msg a[href*='/boss/'], .gc-in-msg a[data-href*='/boss/']") ||
+        node.querySelector(".gc-msg a[hx-get*='/boss/'], .gc-msg a[href*='/boss/'], .gc-msg a[data-href*='/boss/']") ||
+        node.querySelector("a[hx-get*='/boss/'], a[href*='/boss/'], a[data-href*='/boss/']");
+
+      if (!anchor || !isVisible(anchor)) {
+        continue;
+      }
+
+      if (ignoredKeys.has(buildAnchorKey(anchor))) {
+        continue;
+      }
+
+      const context = normalize(node.innerText || getContextText(anchor));
+      const linkValue = getBossLinkValue(anchor);
+      if (!linkValue.includes("/boss/")) {
+        continue;
+      }
+
+      if (
+        context.includes(keywordNorm) &&
+        context.includes("boss") &&
+        (
+          context.includes("waitingforyou") ||
+          context.includes("apareceu") ||
+          context.includes("appeared") ||
+          context.includes("spawned")
+        )
+      ) {
+        return anchor;
+      }
+    }
+
+    return null;
+  }
+
   function getBossAnchors() {
     return Array.from(document.querySelectorAll("#gChatList a, a[href*='/boss/'], a[hx-get*='/boss/']"))
       .filter(isVisible)
@@ -1397,6 +1445,7 @@
     };
 
     const existingVisibleBoss =
+      findBossChatMessageAnchor(config.keyword, state.seenKeys, chatList) ||
       findMatchingBossAnchorInChatList(config.keyword, state.seenKeys, chatList, windowInfo) ||
       findMatchingBossAnchor(config.keyword, state.seenKeys, document, windowInfo);
     if (await tryBossSequence(existingVisibleBoss)) {
@@ -1423,7 +1472,9 @@
         return;
       }
 
-      const liveBoss = findMatchingBossAnchorInChatList(config.keyword, state.seenKeys, chatList, windowInfo);
+      const liveBoss =
+        findBossChatMessageAnchor(config.keyword, state.seenKeys, chatList) ||
+        findMatchingBossAnchorInChatList(config.keyword, state.seenKeys, chatList, windowInfo);
       if (liveBoss) {
         processing = true;
         observer.disconnect();
@@ -1461,7 +1512,9 @@
           );
 
           for (const root of uniqueRoots) {
-            const bossAnchor = findMatchingBossAnchor(config.keyword, state.seenKeys, root, windowInfo);
+            const bossAnchor =
+              findBossChatMessageAnchor(config.keyword, state.seenKeys, chatList) ||
+              findMatchingBossAnchor(config.keyword, state.seenKeys, root, windowInfo);
             if (!bossAnchor) {
               continue;
             }
@@ -1484,7 +1537,9 @@
 
     let lastLogAt = 0;
     while (Date.now() <= windowInfo.endMs && !completed && !finished) {
-      const liveBoss = findMatchingBossAnchorInChatList(config.keyword, state.seenKeys, chatList, windowInfo);
+      const liveBoss =
+        findBossChatMessageAnchor(config.keyword, state.seenKeys, chatList) ||
+        findMatchingBossAnchorInChatList(config.keyword, state.seenKeys, chatList, windowInfo);
       if (liveBoss) {
         observer.disconnect();
         const success = await tryBossSequence(liveBoss);

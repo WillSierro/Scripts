@@ -19,6 +19,9 @@ Colecao de userscripts do Tampermonkey.
 - `Dungeon_Test.user.js`
   Observa o chat global e reage apenas quando `TheVamp` ou `Nuvem` abrirem `DUNGEON`. Faz alerta e pode enviar Telegram.
 
+- `Teste_Dungeon.user.js`
+  Script minimo para validar o clique automatico em qualquer DUNGEON nova que aparecer no chat.
+
 ## Controles
 
 - Verde = ativo
@@ -30,4 +33,5 @@ Colecao de userscripts do Tampermonkey.
 
 - As configuracoes ficam salvas no navegador, entao em geral nao precisa configurar tudo de novo a cada `F5`.
 - O `Dungeon_Test.user.js` ja pode trabalhar com Telegram configurado.
+- O `Teste_Dungeon.user.js` existe para isolar e validar o clique em links de DUNGEON.
 - Se a tag de algum boss mudar no servidor, reconfigure o script correspondente.
