@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Lamentosa Dungeon Alert
+// @name         Lamentosa Dg Poison
 // @namespace    codex.lamentosa
-// @version      1.3.0
-// @description  Clica em DUNGEON apenas para TheVamp e Nuvem, com alerta sonoro e alerta fixo no Telegram.
+// @version      1.6.0
+// @description  Entra na DUNGEON de TheVamp/Nuvem, arma o veneno aos 4s do running e ataca aos 1s, com aviso Telegram.
 // @match        *://*/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -22,8 +22,32 @@
   const BUTTON_ACTIVE_BG = "#2f8f46";
   const BUTTON_INACTIVE_BG = "#9a2f2f";
   const STORAGE_KEY = "lamentosaDungeonAlertConfig";
+  const PENDING_POISON_KEY = "lamentosaDungeonAlertPendingPoisons";
   const TARGET_PLAYERS = ["TheVamp", "Nuvem"];
   const VOICE_ALERT_TEXT = "jogar veneno";
+  const ACTION_TIMEOUT_MS = 8000;
+  const ACTION_POLL_INTERVAL_MS = 120;
+  const TIMER_POLL_INTERVAL_MS = 150;
+  const POISON_PREPARE_SECONDS = 4;
+  const POISON_ATTACK_SECONDS = 1;
+  const PENDING_POISON_MAX_AGE_MS = 5 * 60 * 1000;
+  const TYPE_START_DELAY_MS = 70;
+  const TYPE_CHAR_DELAY_MS = 45;
+  const TYPE_FINISH_DELAY_MS = 80;
+  const BRAZIL_TIMEZONE = "America/Sao_Paulo";
+  const POISON_ATTEMPT_PATTERNS = ["try to poison", "tries to poison", "tried to poison"];
+  const POISON_CONFIG = {
+    thevamp: {
+      itemPk: "945168",
+      itemName: "Defense Poison",
+      targetName: "TheVamp",
+    },
+    nuvem: {
+      itemPk: "945167",
+      itemName: "Strength Poison",
+      targetName: "Nuvem",
+    },
+  };
   const DEFAULT_TELEGRAM_CONFIG = {
     enabled: true,
     telegramEnabled: true,
@@ -31,7 +55,10 @@
     telegramChatId: "-1001840156311",
   };
   const seenKeys = new Set();
+  const pendingPoisonIds = new Set();
   let buttonNode = null;
+  let poisonRunnerTimerId = 0;
+  let poisonRunnerActive = false;
 
   if (!ENABLED_HOSTS.some((pattern) => pattern.test(location.hostname))) {
     return;
@@ -130,7 +157,9 @@
   }
 
   function showToast(message) {
-    console.log(`[Lamentosa Dungeon Alert] ${message}`);
+    const node = getToastNode();
+    node.textContent = message;
+    console.log(`[Lamentosa Dg Poison] ${message}`);
   }
 
   function updateButtonState() {
@@ -183,8 +212,8 @@
     const button = document.createElement("button");
     button.id = CONTROL_BUTTON_ID;
     button.type = "button";
-    button.textContent = "Dungeon Alert";
-    button.title = "Clique para ligar/desligar o Dungeon Alert. Ctrl+Alt+D tambem alterna.";
+    button.textContent = "Dg Poison";
+    button.title = "Clique para ligar/desligar o Dg Poison. Ctrl+Alt+D tambem alterna.";
     button.style.minWidth = "150px";
     button.style.padding = "8px 12px";
     button.style.border = "0";
@@ -197,11 +226,18 @@
     updateButtonState();
     button.addEventListener("click", () => {
       const config = loadConfig();
-      saveConfig({
+      const nextConfig = {
         ...config,
         enabled: !config.enabled,
-      });
+      };
+      saveConfig(nextConfig);
       updateButtonState();
+      if (nextConfig.enabled) {
+        schedulePendingPoisonRunner();
+      } else if (poisonRunnerTimerId) {
+        window.clearTimeout(poisonRunnerTimerId);
+        poisonRunnerTimerId = 0;
+      }
     });
     buttonHost.appendChild(button);
 
@@ -209,11 +245,18 @@
       if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "d") {
         event.preventDefault();
         const config = loadConfig();
-        saveConfig({
+        const nextConfig = {
           ...config,
           enabled: !config.enabled,
-        });
+        };
+        saveConfig(nextConfig);
         updateButtonState();
+        if (nextConfig.enabled) {
+          schedulePendingPoisonRunner();
+        } else if (poisonRunnerTimerId) {
+          window.clearTimeout(poisonRunnerTimerId);
+          poisonRunnerTimerId = 0;
+        }
       }
     });
   }
@@ -242,6 +285,11 @@
   }
 
   function dispatchClick(element) {
+    if (typeof element.click === "function") {
+      element.click();
+      return;
+    }
+
     element.dispatchEvent(
       new MouseEvent("click", {
         bubbles: true,
@@ -249,9 +297,26 @@
         view: window,
       })
     );
-    if (typeof element.click === "function") {
-      element.click();
+  }
+
+  function activateElement(element) {
+    if (!element) {
+      return;
     }
+
+    if (typeof element.scrollIntoView === "function") {
+      element.scrollIntoView({ block: "center", inline: "center" });
+    }
+
+    if (typeof element.focus === "function") {
+      try {
+        element.focus({ preventScroll: true });
+      } catch (error) {
+        element.focus();
+      }
+    }
+
+    dispatchClick(element);
   }
 
   function normalizeToken(value) {
@@ -260,6 +325,730 @@
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9]+/g, "");
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function loadPendingPoisons() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(PENDING_POISON_KEY) || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function savePendingPoisons(jobs) {
+    localStorage.setItem(PENDING_POISON_KEY, JSON.stringify(jobs));
+  }
+
+  function prunePendingPoisons() {
+    const originalJobs = loadPendingPoisons();
+    const now = Date.now();
+    const jobs = originalJobs.filter((job) => {
+      const createdAt = Number(job.createdAt || 0);
+      return createdAt > 0 && now - createdAt <= PENDING_POISON_MAX_AGE_MS;
+    });
+    if (jobs.length !== originalJobs.length) {
+      savePendingPoisons(jobs);
+    }
+    return jobs;
+  }
+
+  function parseTimerSeconds(value) {
+    const match = String(value || "").trim().match(/^(\d{2}):(\d{2}):(\d{2})$/);
+    if (!match) {
+      return null;
+    }
+
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    const seconds = Number(match[3]);
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+
+  function getFieldTimerState() {
+    const timer = document.querySelector("#fieldTimer");
+    if (!timer || !isVisible(timer)) {
+      return null;
+    }
+
+    const rawText = String(timer.textContent || "").trim();
+    return {
+      element: timer,
+      text: rawText,
+      seconds: parseTimerSeconds(rawText),
+      isJoin: timer.classList.contains("status-join"),
+      isRunning: timer.classList.contains("status-running"),
+    };
+  }
+
+  async function waitForRunningTimerAtOrBelow(targetSeconds, timeoutMs = ACTION_TIMEOUT_MS * 2) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const timerState = getFieldTimerState();
+      if (
+        timerState &&
+        timerState.isRunning &&
+        timerState.seconds !== null &&
+        timerState.seconds <= targetSeconds
+      ) {
+        return timerState;
+      }
+      await sleep(40);
+    }
+    return null;
+  }
+
+  function queuePoison(playerName) {
+    const poison = POISON_CONFIG[normalizeToken(playerName)];
+    if (!poison) {
+      return;
+    }
+
+    const now = Date.now();
+    const jobs = prunePendingPoisons();
+    const duplicate = jobs.find(
+      (job) => normalizeToken(job.playerName) === normalizeToken(playerName)
+    );
+    if (duplicate) {
+      schedulePendingPoisonRunner();
+      return;
+    }
+
+    jobs.push({
+      id: `${normalizeToken(playerName)}-${now}`,
+      playerName: poison.targetName,
+      itemPk: poison.itemPk,
+      itemName: poison.itemName,
+      createdAt: now,
+    });
+    savePendingPoisons(jobs);
+    showToast(
+      `Veneno de ${poison.itemName} agendado para ${poison.targetName}. Prepara aos ${POISON_PREPARE_SECONDS}s e ataca aos ${POISON_ATTACK_SECONDS}s.`
+    );
+    schedulePendingPoisonRunner();
+  }
+
+  function removePendingPoison(jobId) {
+    const jobs = loadPendingPoisons().filter((job) => job.id !== jobId);
+    savePendingPoisons(jobs);
+    pendingPoisonIds.delete(jobId);
+  }
+
+  function schedulePendingPoisonRunner() {
+    if (poisonRunnerTimerId) {
+      window.clearTimeout(poisonRunnerTimerId);
+      poisonRunnerTimerId = 0;
+    }
+
+    if (!isEnabled()) {
+      return;
+    }
+
+    const jobs = prunePendingPoisons().sort(
+      (a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)
+    );
+    if (!jobs.length) {
+      return;
+    }
+
+    poisonRunnerTimerId = window.setTimeout(() => {
+      poisonRunnerTimerId = 0;
+      processPendingPoisons().catch((error) => {
+        console.error("[Lamentosa Dg Poison] Erro ao processar veneno pendente", error);
+      });
+    }, TIMER_POLL_INTERVAL_MS);
+  }
+
+  function setNativeInputValue(input, value) {
+    const proto = Object.getPrototypeOf(input);
+    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+    if (descriptor && typeof descriptor.set === "function") {
+      descriptor.set.call(input, value);
+    } else {
+      input.value = value;
+    }
+  }
+
+  function dispatchInputEvent(input, data = null, inputType = "insertText") {
+    try {
+      input.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          cancelable: false,
+          data,
+          inputType,
+        })
+      );
+    } catch (error) {
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }
+
+  function dispatchBeforeInputEvent(input, data = null, inputType = "insertText") {
+    try {
+      return input.dispatchEvent(
+        new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          data,
+          inputType,
+        })
+      );
+    } catch (error) {
+      return input.dispatchEvent(new Event("beforeinput", { bubbles: true, cancelable: true }));
+    }
+  }
+
+  function setInputValue(input, value) {
+    setNativeInputValue(input, value);
+    dispatchInputEvent(input, value, "insertReplacementText");
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function dispatchKeyboardEvent(input, type, key) {
+    const isSingleChar = typeof key === "string" && key.length === 1;
+    const upperKey = isSingleChar ? key.toUpperCase() : "";
+    const charCode = isSingleChar ? key.charCodeAt(0) : 0;
+    input.dispatchEvent(
+      new KeyboardEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        key,
+        code: /^[A-Z]$/.test(upperKey)
+          ? `Key${upperKey}`
+          : /^[0-9]$/.test(key)
+            ? `Digit${key}`
+            : "",
+        keyCode: charCode,
+        which: charCode,
+      })
+    );
+  }
+
+  function dispatchMouseEvent(element, type) {
+    element.dispatchEvent(
+      new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+      })
+    );
+  }
+
+  function setSelectionRangeSafe(input, start, end = start) {
+    if (typeof input.setSelectionRange !== "function") {
+      return;
+    }
+
+    try {
+      input.setSelectionRange(start, end);
+    } catch (error) {
+      // ignore selection failures on custom inputs
+    }
+  }
+
+  async function focusInputForTyping(input) {
+    if (typeof input.scrollIntoView === "function") {
+      input.scrollIntoView({ block: "center", inline: "center" });
+    }
+
+    dispatchMouseEvent(input, "mouseover");
+    dispatchMouseEvent(input, "mouseenter");
+    dispatchMouseEvent(input, "mousemove");
+    dispatchMouseEvent(input, "mousedown");
+    if (typeof input.focus === "function") {
+      try {
+        input.focus({ preventScroll: true });
+      } catch (error) {
+        input.focus();
+      }
+    }
+    dispatchMouseEvent(input, "mouseup");
+    dispatchMouseEvent(input, "click");
+    await sleep(TYPE_START_DELAY_MS);
+  }
+
+  async function typeIntoInput(input, value) {
+    await focusInputForTyping(input);
+    setNativeInputValue(input, "");
+    setSelectionRangeSafe(input, 0, String(input.value || "").length);
+    dispatchKeyboardEvent(input, "keydown", "Backspace");
+    dispatchBeforeInputEvent(input, null, "deleteContentBackward");
+    dispatchInputEvent(input, null, "deleteContentBackward");
+    dispatchKeyboardEvent(input, "keyup", "Backspace");
+    await sleep(TYPE_CHAR_DELAY_MS);
+
+    for (const char of String(value)) {
+      if (document.activeElement !== input) {
+        input.focus();
+        setSelectionRangeSafe(input, String(input.value || "").length);
+      }
+
+      dispatchKeyboardEvent(input, "keydown", char);
+      dispatchKeyboardEvent(input, "keypress", char);
+      dispatchBeforeInputEvent(input, char, "insertText");
+      const nextValue = `${String(input.value || "")}${char}`;
+      setNativeInputValue(input, nextValue);
+      setSelectionRangeSafe(input, nextValue.length, nextValue.length);
+      dispatchInputEvent(input, char, "insertText");
+      dispatchKeyboardEvent(input, "keyup", char);
+      await sleep(TYPE_CHAR_DELAY_MS);
+    }
+
+    if (String(input.value || "") !== String(value)) {
+      throw new Error(`Nao consegui digitar ${value} no campo de alvo.`);
+    }
+
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(TYPE_FINISH_DELAY_MS);
+  }
+
+  function isTargetTextInput(element) {
+    if (
+      !element ||
+      !(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) ||
+      element.disabled ||
+      element.readOnly
+    ) {
+      return false;
+    }
+
+    const type = String(element.getAttribute("type") || "text").toLowerCase();
+    if (
+      [
+        "hidden",
+        "submit",
+        "button",
+        "checkbox",
+        "radio",
+        "file",
+        "range",
+        "color",
+      ].includes(type)
+    ) {
+      return false;
+    }
+
+    return isVisible(element);
+  }
+
+  function collectActionRoots() {
+    const seen = new Set();
+    const roots = [];
+    const pushRoot = (root) => {
+      if (!root || seen.has(root)) {
+        return;
+      }
+      if (root !== document && !isVisible(root)) {
+        return;
+      }
+      seen.add(root);
+      roots.push(root);
+    };
+
+    Array.from(
+      document.querySelectorAll("form, .modal, .modal-ct, [role='dialog'], .fancybox-content, .swal2-popup")
+    ).forEach(pushRoot);
+
+    const searchButton = findLabeledButton(["Procurar", "Search"]);
+    const attackButton = findLabeledButton(["Atacar!", "Atacar", "Attack!"]);
+    pushRoot(getActionRoot(searchButton));
+    pushRoot(getActionRoot(attackButton));
+    pushRoot(document);
+    return roots;
+  }
+
+  function scoreTargetInput(input) {
+    let score = 0;
+    const context = [
+      input.id,
+      input.name,
+      input.placeholder,
+      input.getAttribute("aria-label"),
+      input.closest("label")?.textContent,
+      getActionRoot(input)?.textContent,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const text = normalizeToken(context);
+
+    if (input.id === "id_target_name" || input.name === "target_name") {
+      score += 20;
+    }
+    if (text.includes("target")) {
+      score += 10;
+    }
+    if (text.includes("nick")) {
+      score += 8;
+    }
+    if (text.includes("nome")) {
+      score += 6;
+    }
+    if (text.includes("player") || text.includes("character")) {
+      score += 4;
+    }
+    if (text.includes("procurar") || text.includes("search")) {
+      score += 3;
+    }
+    if (text.includes("atacar") || text.includes("attack")) {
+      score += 2;
+    }
+
+    return score;
+  }
+
+  function findTargetInput() {
+    const exactSelectors = [
+      "#id_target_name",
+      "input[name='target_name']",
+      "input[name*='target']",
+      "input[id*='target']",
+      "input[placeholder*='nick']",
+      "input[placeholder*='Nick']",
+      "input[placeholder*='nome']",
+      "input[placeholder*='Nome']",
+      "input[placeholder*='name']",
+      "input[placeholder*='Name']",
+    ];
+
+    for (const root of collectActionRoots()) {
+      for (const selector of exactSelectors) {
+        const match = Array.from(root.querySelectorAll(selector)).find(isTargetTextInput);
+        if (match) {
+          return match;
+        }
+      }
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    for (const root of collectActionRoots()) {
+      Array.from(root.querySelectorAll("input, textarea"))
+        .filter(isTargetTextInput)
+        .forEach((input) => {
+          if (seen.has(input)) {
+            return;
+          }
+          seen.add(input);
+          candidates.push(input);
+        });
+    }
+
+    candidates.sort((left, right) => scoreTargetInput(right) - scoreTargetInput(left));
+    return candidates[0] || null;
+  }
+
+  function isEnabled() {
+    return loadConfig().enabled;
+  }
+
+  async function waitForElement(getter, timeoutMs = ACTION_TIMEOUT_MS, intervalMs = ACTION_POLL_INTERVAL_MS) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const element = getter();
+      if (element) {
+        return element;
+      }
+      await sleep(intervalMs);
+    }
+    return null;
+  }
+
+  function findLabeledButton(labels, root = document) {
+    const tokens = labels.map(normalizeToken);
+    return (
+      Array.from(root.querySelectorAll("button, a.btn, a, input[type='submit'], input[type='button']"))
+        .filter(isVisible)
+        .find((element) => {
+          const text = normalizeToken(element.textContent || element.value || "");
+          return tokens.some((token) => text === token || text.includes(token));
+        }) || null
+    );
+  }
+
+  function findVisibleBySelectors(selectors, root = document) {
+    for (const selector of selectors) {
+      const match = Array.from(root.querySelectorAll(selector)).find(isVisible);
+      if (match) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  function findSearchButton(root = document) {
+    return (
+      findLabeledButton(["Procurar", "Search"], root) ||
+      findVisibleBySelectors(
+        [
+          "button[type='submit']",
+          "input[type='submit']",
+          "button[name*='search']",
+          "button[id*='search']",
+          "button[class*='search']",
+          "button[data-action*='search']",
+          "a[data-action*='search']",
+        ],
+        root
+      )
+    );
+  }
+
+  function findAttackButton(root = document) {
+    return (
+      findLabeledButton(["Atacar!", "Atacar", "Attack!", "Attack", "Confirmar", "Confirm"], root) ||
+      findVisibleBySelectors(
+        [
+          "a[href*='/attack/']",
+          "a[href*='attack']",
+          "button[data-action*='attack']",
+          "a[data-action*='attack']",
+          ".ui-ws-action[data-action*='attack']",
+          "input[type='submit'][value*='Atacar']",
+          "input[type='submit'][value*='Attack']",
+          "input[type='button'][value*='Atacar']",
+          "input[type='button'][value*='Attack']",
+        ],
+        root
+      )
+    );
+  }
+
+  function findAnyAttackButton() {
+    for (const root of collectActionRoots()) {
+      const match = findAttackButton(root);
+      if (match) {
+        return match;
+      }
+    }
+    return findAttackButton(document);
+  }
+
+  function getActionRoot(element) {
+    return (
+      element?.closest("form, .modal, .modal-ct, [role='dialog'], .fancybox-content, .swal2-popup") ||
+      document
+    );
+  }
+
+  function getPoisonItemConfig(playerName) {
+    return POISON_CONFIG[normalizeToken(playerName)] || null;
+  }
+
+  function findPoisonOpenButton(itemPk) {
+    return (
+      document.querySelector(`a[rel='modal'][data-content-selector='.inv-md${itemPk}']`) || null
+    );
+  }
+
+  function findUsePoisonButton(itemPk) {
+    const selectors = [
+      `a[href='/items/sub-search-target/${itemPk}/']`,
+      `a[href*='/items/sub-search-target/${itemPk}/']`,
+      `a[data-item-pk='${itemPk}'][href*='/items/sub-search-target/']`,
+    ];
+
+    for (const selector of selectors) {
+      const visible = Array.from(document.querySelectorAll(selector)).find(isVisible);
+      if (visible) {
+        return visible;
+      }
+      const fallback = document.querySelector(selector);
+      if (fallback) {
+        return fallback;
+      }
+    }
+
+    return null;
+  }
+
+  function findPoisonSearchForm(itemPk) {
+    const selector = `form[action='/items/sub-search-target/${itemPk}/'], form[action*='/items/sub-search-target/${itemPk}/']`;
+    return Array.from(document.querySelectorAll(selector)).find(isVisible) || null;
+  }
+
+  function findPoisonTargetInput(itemPk) {
+    const form = findPoisonSearchForm(itemPk);
+    if (!form) {
+      return null;
+    }
+
+    return (
+      Array.from(
+        form.querySelectorAll(
+          "#id_target_name, input[name='target_name'], input[placeholder='Nome do alvo'], input[placeholder*='Nome do alvo']"
+        )
+      ).find(isTargetTextInput) || null
+    );
+  }
+
+  function findPoisonSearchButton(itemPk) {
+    const form = findPoisonSearchForm(itemPk);
+    if (!form) {
+      return null;
+    }
+
+    return findSearchButton(form);
+  }
+
+  function submitSearchForm(form, submitter) {
+    if (form && typeof form.requestSubmit === "function") {
+      if (
+        submitter &&
+        (submitter instanceof HTMLButtonElement || submitter instanceof HTMLInputElement)
+      ) {
+        try {
+          form.requestSubmit(submitter);
+          return true;
+        } catch (error) {
+          // fall through to generic submit
+        }
+      }
+
+      try {
+        form.requestSubmit();
+        return true;
+      } catch (error) {
+        // fall through to click/submit fallback
+      }
+    }
+
+    if (submitter) {
+      activateElement(submitter);
+      return true;
+    }
+
+    return !!form?.dispatchEvent?.(new Event("submit", { bubbles: true, cancelable: true }));
+  }
+
+  async function runPoisonSequence(job) {
+    const poison = getPoisonItemConfig(job.playerName);
+    if (!poison) {
+      return true;
+    }
+
+    if (!isEnabled()) {
+      return false;
+    }
+
+    const openButton = findPoisonOpenButton(poison.itemPk);
+    if (openButton) {
+      activateElement(openButton);
+      await sleep(120);
+    }
+
+    const useButton = await waitForElement(() => findUsePoisonButton(poison.itemPk));
+    if (!useButton) {
+      showToast(`Nao achei o botao Usar do ${poison.itemName}.`);
+      return false;
+    }
+    activateElement(useButton);
+
+    const searchForm = await waitForElement(() => findPoisonSearchForm(poison.itemPk));
+    if (!searchForm) {
+      showToast(`Nao achei o formulario do ${poison.itemName}.`);
+      return false;
+    }
+
+    const targetInput = await waitForElement(() => findPoisonTargetInput(poison.itemPk));
+    if (!targetInput || !isVisible(targetInput)) {
+      showToast(`Nao achei o campo de alvo para ${poison.targetName}.`);
+      return false;
+    }
+    await typeIntoInput(targetInput, poison.targetName);
+    if (String(targetInput.value || "").trim() !== poison.targetName) {
+      showToast(`O campo do alvo nao ficou com ${poison.targetName}. Parei antes de Procurar.`);
+      return false;
+    }
+
+    const actionRoot = getActionRoot(targetInput);
+    const searchButton = await waitForElement(() => findPoisonSearchButton(poison.itemPk));
+    if (!searchButton) {
+      showToast(`Nao achei o botao Procurar para ${poison.targetName}.`);
+      return false;
+    }
+    submitSearchForm(searchForm, searchButton);
+
+    const attackButton = await waitForElement(
+      () => findAttackButton(actionRoot) || findAnyAttackButton(),
+      ACTION_TIMEOUT_MS * 2
+    );
+    if (!attackButton) {
+      showToast(`Nao achei o botao Atacar para ${poison.targetName}.`);
+      return false;
+    }
+
+    showToast(`Veneno armado em ${poison.targetName}. Esperando ${POISON_ATTACK_SECONDS}s para atacar.`);
+    const readyTimer = await waitForRunningTimerAtOrBelow(POISON_ATTACK_SECONDS);
+    if (!readyTimer) {
+      showToast(`Armei o veneno em ${poison.targetName}, mas nao chegou no timing de ${POISON_ATTACK_SECONDS}s.`);
+      return false;
+    }
+
+    const finalAttackButton = findAttackButton(actionRoot) || findAnyAttackButton() || attackButton;
+    activateElement(finalAttackButton);
+    showToast(`Veneno ${poison.itemName} usado em ${poison.targetName} com timer ${readyTimer.text}.`);
+    return true;
+  }
+
+  async function processPendingPoisons() {
+    if (poisonRunnerActive) {
+      return;
+    }
+
+    poisonRunnerActive = true;
+    try {
+      if (!isEnabled()) {
+        return;
+      }
+
+      const jobs = prunePendingPoisons().sort(
+        (a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0)
+      );
+      const currentJob = jobs[0];
+      if (!currentJob || pendingPoisonIds.has(currentJob.id)) {
+        return;
+      }
+
+      const timerState = getFieldTimerState();
+      if (!timerState || timerState.seconds === null) {
+        return;
+      }
+
+      if (timerState.isJoin) {
+        return;
+      }
+
+      if (!timerState.isRunning) {
+        return;
+      }
+
+      if (timerState.seconds > POISON_PREPARE_SECONDS) {
+        return;
+      }
+
+      pendingPoisonIds.add(currentJob.id);
+      const success = await runPoisonSequence(currentJob);
+      const latestTimerState = getFieldTimerState();
+      if (
+        success ||
+        (latestTimerState &&
+          latestTimerState.isRunning &&
+          latestTimerState.seconds !== null &&
+          latestTimerState.seconds <= 0)
+      ) {
+        removePendingPoison(currentJob.id);
+      } else {
+        pendingPoisonIds.delete(currentJob.id);
+      }
+    } finally {
+      poisonRunnerActive = false;
+      schedulePendingPoisonRunner();
+    }
   }
 
   function playAlertSound() {
@@ -275,7 +1064,7 @@
       oscillator.start();
       oscillator.stop(audioContext.currentTime + 0.18);
     } catch (error) {
-      console.warn("[Lamentosa Dungeon Alert] Falha ao tocar beep", error);
+      console.warn("[Lamentosa Dg Poison] Falha ao tocar beep", error);
     }
   }
 
@@ -294,18 +1083,30 @@
       window.speechSynthesis.cancel();
       window.speechSynthesis.speak(utterance);
     } catch (error) {
-      console.warn("[Lamentosa Dungeon Alert] Falha ao falar alerta", error);
+      console.warn("[Lamentosa Dg Poison] Falha ao falar alerta", error);
       playAlertSound();
     }
   }
 
-  function sendTelegramAlert(playerName) {
+  function formatBrazilTimestamp(date = new Date()) {
+    return new Intl.DateTimeFormat("pt-BR", {
+      timeZone: BRAZIL_TIMEZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(date);
+  }
+
+  function sendTelegramMessage(message, successMessage = "") {
     const config = loadConfig();
     if (!config.telegramEnabled || !config.telegramBotToken || !config.telegramChatId) {
       return;
     }
 
-    const message = `O ${playerName} iniciou uma DUNGEON, jogue um Veneno nele`;
     const url = `https://api.telegram.org/bot${encodeURIComponent(config.telegramBotToken)}/sendMessage`;
     const payload = JSON.stringify({
       chat_id: config.telegramChatId,
@@ -321,7 +1122,9 @@
         },
         data: payload,
         onload: () => {
-          showToast(`Telegram enviado para ${playerName}.`);
+          if (successMessage) {
+            showToast(successMessage);
+          }
         },
         onerror: () => {
           showToast("Falha ao enviar alerta para o Telegram.");
@@ -337,8 +1140,24 @@
       },
       body: payload,
     })
-      .then(() => showToast(`Telegram enviado para ${playerName}.`))
+      .then(() => {
+        if (successMessage) {
+          showToast(successMessage);
+        }
+      })
       .catch(() => showToast("Falha ao enviar alerta para o Telegram."));
+  }
+
+  function sendDungeonAlert(playerName) {
+    sendTelegramMessage(
+      `O ${playerName} iniciou uma DUNGEON, jogue um Veneno nele`,
+      `Telegram enviado para ${playerName}.`
+    );
+  }
+
+  function sendPoisonAttemptAlert(attackerName, targetName) {
+    const timestamp = formatBrazilTimestamp();
+    sendTelegramMessage(`[${timestamp}] ${attackerName} tentou envenenar ${targetName}.`);
   }
 
   function getMessageKey(messageNode) {
@@ -358,6 +1177,11 @@
   function isDungeonAnnouncement(messageNode) {
     const text = normalize(messageNode.innerText || messageNode.textContent || "");
     return text.includes("started a new dungeon");
+  }
+
+  function isPoisonAttemptMessage(messageNode) {
+    const text = normalize(messageNode.innerText || messageNode.textContent || "");
+    return POISON_ATTEMPT_PATTERNS.some((pattern) => text.includes(pattern));
   }
 
   function findPlayerName(messageNode) {
@@ -386,6 +1210,42 @@
     return null;
   }
 
+  function findPoisonAttemptDetails(messageNode) {
+    if (!isPoisonAttemptMessage(messageNode)) {
+      return null;
+    }
+
+    const targetName = findPlayerName(messageNode);
+    if (!targetName) {
+      return null;
+    }
+
+    const targetToken = normalizeToken(targetName);
+    const anchors = Array.from(messageNode.querySelectorAll("a"));
+    const attackerAnchor = anchors.find((anchor) => {
+      const href = anchor.getAttribute("href") || anchor.getAttribute("hx-get") || "";
+      const text = String(anchor.textContent || "").trim();
+      const token = normalizeToken(text);
+      return href.includes("/public/") && token && token !== targetToken;
+    });
+
+    if (attackerAnchor) {
+      return {
+        attackerName: String(attackerAnchor.textContent || "").trim(),
+        targetName,
+      };
+    }
+
+    const rawText = String(messageNode.innerText || messageNode.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const attackerMatch = rawText.match(/(.+?)\s+(?:try|tries|tried)\s+to\s+poison\b/i);
+    return {
+      attackerName: attackerMatch?.[1]?.trim() || "Alguem",
+      targetName,
+    };
+  }
+
   function handleMessage(messageNode, isInitial) {
     const config = loadConfig();
     if (!config.enabled) {
@@ -406,6 +1266,13 @@
       return;
     }
 
+    const poisonAttempt = findPoisonAttemptDetails(messageNode);
+    if (poisonAttempt) {
+      showToast(`${poisonAttempt.attackerName} tentou envenenar ${poisonAttempt.targetName}.`);
+      sendPoisonAttemptAlert(poisonAttempt.attackerName, poisonAttempt.targetName);
+      return;
+    }
+
     if (!isDungeonAnnouncement(messageNode)) {
       return;
     }
@@ -423,8 +1290,9 @@
 
     showToast(`DUNGEON de ${playerName} detectada. Jogar veneno.`);
     speakAlert();
-    sendTelegramAlert(playerName);
-    dispatchClick(dungeonLink);
+    sendDungeonAlert(playerName);
+    activateElement(dungeonLink);
+    queuePoison(playerName);
     showToast(`Cliquei no link DUNGEON de ${playerName}.`);
   }
 
@@ -472,5 +1340,6 @@
 
   ensureDefaultConfigSaved();
   installControls();
+  schedulePendingPoisonRunner();
   waitForChatList();
 })();
