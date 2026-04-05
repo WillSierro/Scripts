@@ -1184,6 +1184,40 @@
     return POISON_ATTEMPT_PATTERNS.some((pattern) => text.includes(pattern));
   }
 
+  function getPublicPlayerAnchors(messageNode) {
+    return Array.from(messageNode.querySelectorAll("a")).filter((anchor) => {
+      const href = anchor.getAttribute("href") || anchor.getAttribute("hx-get") || "";
+      return href.includes("/public/");
+    });
+  }
+
+  function findTrackedPlayerNameInText(text) {
+    const textToken = normalizeToken(text);
+    for (const player of TARGET_PLAYERS) {
+      if (textToken.includes(normalizeToken(player))) {
+        return player;
+      }
+    }
+    return null;
+  }
+
+  function findPublicAnchorInTextPart(anchors, textPart) {
+    const textToken = normalizeToken(textPart);
+    return (
+      anchors.find((anchor) => {
+        const token = normalizeToken(anchor.textContent || "");
+        return token && textToken.includes(token);
+      }) || null
+    );
+  }
+
+  function cleanupPlayerLabel(text) {
+    return String(text || "")
+      .replace(/\s+/g, " ")
+      .replace(/^[\s:;,\-.\]]+|[\s:;,\-.!]+$/g, "")
+      .trim();
+  }
+
   function findPlayerName(messageNode) {
     const anchors = Array.from(messageNode.querySelectorAll("a"));
     const targetTokens = TARGET_PLAYERS.map(normalizeToken);
@@ -1215,34 +1249,27 @@
       return null;
     }
 
-    const targetName = findPlayerName(messageNode);
+    const rawText = String(messageNode.innerText || messageNode.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const match = rawText.match(/(.+?)\s+(?:try|tries|tried)\s+to\s+poison\s+(.+?)(?:[.!]|$)/i);
+    if (!match) {
+      return null;
+    }
+
+    const attackerPart = cleanupPlayerLabel(match[1]);
+    const receiverPart = cleanupPlayerLabel(match[2]);
+    const targetName = findTrackedPlayerNameInText(receiverPart);
     if (!targetName) {
       return null;
     }
 
-    const targetToken = normalizeToken(targetName);
-    const anchors = Array.from(messageNode.querySelectorAll("a"));
-    const attackerAnchor = anchors.find((anchor) => {
-      const href = anchor.getAttribute("href") || anchor.getAttribute("hx-get") || "";
-      const text = String(anchor.textContent || "").trim();
-      const token = normalizeToken(text);
-      return href.includes("/public/") && token && token !== targetToken;
-    });
-
-    if (attackerAnchor) {
-      return {
-        attackerName: String(attackerAnchor.textContent || "").trim(),
-        targetName,
-      };
-    }
-
-    const rawText = String(messageNode.innerText || messageNode.textContent || "")
-      .replace(/\s+/g, " ")
-      .trim();
-    const attackerMatch = rawText.match(/(.+?)\s+(?:try|tries|tried)\s+to\s+poison\b/i);
+    const publicAnchors = getPublicPlayerAnchors(messageNode);
+    const attackerAnchor = findPublicAnchorInTextPart(publicAnchors, attackerPart);
+    const targetAnchor = findPublicAnchorInTextPart(publicAnchors, receiverPart);
     return {
-      attackerName: attackerMatch?.[1]?.trim() || "Alguem",
-      targetName,
+      attackerName: String(attackerAnchor?.textContent || attackerPart || "Alguem").trim(),
+      targetName: String(targetAnchor?.textContent || targetName).trim(),
     };
   }
 
