@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
-// @name         Lamentosa Boss Auto
+// @name         Lamentosa Abre Boss
 // @namespace    codex.lamentosa
-// @version      1.3.9
-// @description  Monitora o chat do boss, clica no boss, em Desafiar e depois no OK.
+// @version      1.0.0
+// @description  Monitora o chat do boss, abre o boss, clica em Desafiar e depois no OK, sem escolha de sessao.
 // @match        *://*/*
 // @run-at       document-idle
 // @grant        none
@@ -16,16 +16,16 @@
   const WINDOW_END_EXTRA_SECONDS = 9;
   const CHALLENGE_TIMEOUT_MS = 10000;
   const CONFIRM_TIMEOUT_MS = 10000;
-  const STORAGE_KEY = "lamentosaBossAutoConfig";
-  const ENABLED_STORAGE_KEY = "lamentosaBossAutoEnabled";
-  const CONTROL_BUTTON_ID = "lamentosa-boss-auto-config-btn";
+  const STORAGE_KEY = "lamentosaAbreBossConfig";
+  const ENABLED_STORAGE_KEY = "lamentosaAbreBossEnabled";
+  const CONTROL_BUTTON_ID = "lamentosa-abre-boss-config-btn";
   const UI_STACK_ID = "lamentosa-ui-stack";
-  const UI_SLOT_ID = "lamentosa-boss-auto-slot";
-  const UI_ORDER = 10;
+  const UI_SLOT_ID = "lamentosa-abre-boss-slot";
+  const UI_ORDER = 15;
   const BUTTON_ACTIVE_BG = "#2f8f46";
   const BUTTON_INACTIVE_BG = "#9a2f2f";
   const DEFAULT_BUTTON_TITLE =
-    "Clique esquerdo configura e liga. Clique direito liga/desliga. Ctrl+Alt+B reconfigura.";
+    "Clique esquerdo configura e liga. Clique direito liga/desliga. Ctrl+Alt+A reconfigura.";
   const CHAT_LIST_SELECTOR = "#gChatList";
   const CHAT_LIST_SELECTORS = [
     "#gChatList",
@@ -97,7 +97,7 @@
   };
 
   function log(message) {
-    console.log(`[Lamentosa Boss Auto] ${message}`);
+    console.log(`[Lamentosa Abre Boss] ${message}`);
     showToast(message);
   }
 
@@ -364,7 +364,7 @@
           return;
         }
       } catch (error) {
-        console.warn("[Lamentosa Boss Auto] requestSubmit falhou, tentando click normal", error);
+        console.warn("[Lamentosa Abre Boss] requestSubmit falhou, tentando click normal", error);
       }
     }
 
@@ -540,7 +540,7 @@
     if (!forcePrompt && saved) {
       log(
         `Usando configuracao salva: ${saved.categoryLabel} / ${saved.keyword} / ${saved.time}. ` +
-          "Use o botao Boss Auto ou Ctrl+Alt+B para reconfigurar."
+          "Use o botao Abre Boss ou Ctrl+Alt+A para reconfigurar."
       );
       return saved;
     }
@@ -631,7 +631,7 @@
     const button = document.createElement("button");
     button.id = CONTROL_BUTTON_ID;
     button.type = "button";
-    button.textContent = "Boss Auto";
+    button.textContent = "Abre Boss";
     button.title = DEFAULT_BUTTON_TITLE;
     button.style.minWidth = "150px";
     button.style.padding = "8px 12px";
@@ -653,7 +653,7 @@
     buttonHost.appendChild(button);
 
     window.addEventListener("keydown", (event) => {
-      if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "b") {
+      if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "a") {
         event.preventDefault();
         openReconfigure();
       }
@@ -1189,7 +1189,7 @@
   async function run() {
     installControls();
     if (!loadEnabled()) {
-      log("Boss Auto pausado.");
+      log("Abre Boss pausado.");
       return;
     }
     const config = promptConfig(false);
@@ -1300,7 +1300,7 @@
         processing = false;
         finished = true;
         if (!success && finalMessage) {
-          log(`Boss Auto finalizado: ${finalMessage}`);
+          log(`Abre Boss finalizado: ${finalMessage}`);
         }
         return;
       }
@@ -1343,7 +1343,7 @@
             processing = false;
             finished = true;
             if (!success && finalMessage) {
-              log(`Boss Auto finalizado: ${finalMessage}`);
+              log(`Abre Boss finalizado: ${finalMessage}`);
             }
             return;
           }
@@ -1363,7 +1363,7 @@
         const success = await tryBossSequence(liveBoss);
         finished = true;
         if (!success && finalMessage) {
-          log(`Boss Auto finalizado: ${finalMessage}`);
+          log(`Abre Boss finalizado: ${finalMessage}`);
         }
         return;
       }
@@ -1385,7 +1385,7 @@
   }
 
   run().catch((error) => {
-    console.error("[Lamentosa Boss Auto] erro inesperado", error);
+    console.error("[Lamentosa Abre Boss] erro inesperado", error);
     showToast(`Erro: ${error?.message || error}`);
   });
 })();
