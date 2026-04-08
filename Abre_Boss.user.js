@@ -633,12 +633,12 @@
     button.type = "button";
     button.textContent = "Abre Boss";
     button.title = DEFAULT_BUTTON_TITLE;
-    button.style.minWidth = "150px";
-    button.style.padding = "8px 12px";
+    button.style.minWidth = "108px";
+    button.style.padding = "6px 10px";
     button.style.border = "0";
     button.style.borderRadius = "999px";
     button.style.color = "#fff";
-    button.style.font = "600 12px/1 Arial, sans-serif";
+    button.style.font = "600 11px/1 Arial, sans-serif";
     button.style.boxShadow = "0 6px 24px rgba(0, 0, 0, 0.3)";
     button.style.cursor = "pointer";
     state.buttonNode = button;

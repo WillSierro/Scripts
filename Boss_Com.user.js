@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
-// @name         Lamentosa Boss Auto
+// @name         Lamentosa Boss Com
 // @namespace    codex.lamentosa
-// @version      1.3.9
-// @description  Monitora o chat do boss, clica no boss, em Desafiar e depois no OK.
+// @version      1.0.0
+// @description  Monitora o chat do boss, abre so os bosses da lista, clica em Desafiar e depois no OK.
 // @match        *://*/*
 // @run-at       document-idle
 // @grant        none
@@ -11,21 +11,34 @@
 (function () {
   "use strict";
 
+  // Remova nomes desta lista quando os elders sairem da logica do Boss Com/Boss Sem.
+  const LISTED_BOSS_NAMES = [
+    "First Adept",
+    "Pain Invoker",
+    "First Mother",
+    "Lost Spirit",
+    "Shyeth",
+    "The Phantom",
+    "Soul Binder",
+    "Shadow Weaver",
+  ];
+  const OPEN_LISTED_BOSSES_ONLY = true;
+
   const ENABLED_HOSTS = [/lamentosa/i];
   const WINDOW_DURATION_MINUTES = 32;
   const WINDOW_END_EXTRA_SECONDS = 9;
   const CHALLENGE_TIMEOUT_MS = 10000;
   const CONFIRM_TIMEOUT_MS = 10000;
-  const STORAGE_KEY = "lamentosaBossAutoConfig";
-  const ENABLED_STORAGE_KEY = "lamentosaBossAutoEnabled";
-  const CONTROL_BUTTON_ID = "lamentosa-boss-auto-config-btn";
+  const STORAGE_KEY = "lamentosaBossComConfig";
+  const ENABLED_STORAGE_KEY = "lamentosaBossComEnabled";
+  const CONTROL_BUTTON_ID = "lamentosa-boss-com-config-btn";
   const UI_STACK_ID = "lamentosa-ui-stack";
-  const UI_SLOT_ID = "lamentosa-boss-auto-slot";
-  const UI_ORDER = 10;
+  const UI_SLOT_ID = "lamentosa-boss-com-slot";
+  const UI_ORDER = 16;
   const BUTTON_ACTIVE_BG = "#2f8f46";
   const BUTTON_INACTIVE_BG = "#9a2f2f";
   const DEFAULT_BUTTON_TITLE =
-    "Clique esquerdo configura e liga. Clique direito liga/desliga. Ctrl+Alt+B reconfigura.";
+    "Clique esquerdo configura e liga. Clique direito liga/desliga. Ctrl+Alt+M reconfigura.";
   const CHAT_LIST_SELECTOR = "#gChatList";
   const CHAT_LIST_SELECTORS = [
     "#gChatList",
@@ -88,6 +101,7 @@
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9]+/g, "");
+  const LISTED_BOSS_NAME_SET = new Set(LISTED_BOSS_NAMES.map(normalize).filter(Boolean));
 
   const state = {
     toastNode: null,
@@ -97,7 +111,7 @@
   };
 
   function log(message) {
-    console.log(`[Lamentosa Boss Auto] ${message}`);
+    console.log(`[Lamentosa Boss Com] ${message}`);
     showToast(message);
   }
 
@@ -364,7 +378,7 @@
           return;
         }
       } catch (error) {
-        console.warn("[Lamentosa Boss Auto] requestSubmit falhou, tentando click normal", error);
+        console.warn("[Lamentosa Boss Com] requestSubmit falhou, tentando click normal", error);
       }
     }
 
@@ -540,7 +554,7 @@
     if (!forcePrompt && saved) {
       log(
         `Usando configuracao salva: ${saved.categoryLabel} / ${saved.keyword} / ${saved.time}. ` +
-          "Use o botao Boss Auto ou Ctrl+Alt+B para reconfigurar."
+          "Use o botao Boss Com ou Ctrl+Alt+M para reconfigurar."
       );
       return saved;
     }
@@ -566,7 +580,7 @@
         `${index + 1}=${item.label}${item.keyword ? ` (${item.keyword})` : ""}`
     ).join("\n");
 
-    const categoryDefault = saved?.categoryLabel || "Soldado";
+    const categoryDefault = saved?.categoryLabel || "Anciao";
     const categoryInput = prompt(
       `Escolha a categoria pelo numero ou nome:\n${categoriesHelp}`,
       categoryDefault
@@ -631,7 +645,7 @@
     const button = document.createElement("button");
     button.id = CONTROL_BUTTON_ID;
     button.type = "button";
-    button.textContent = "Boss Auto";
+    button.textContent = "Boss Com";
     button.title = DEFAULT_BUTTON_TITLE;
     button.style.minWidth = "108px";
     button.style.padding = "6px 10px";
@@ -653,7 +667,7 @@
     buttonHost.appendChild(button);
 
     window.addEventListener("keydown", (event) => {
-      if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "b") {
+      if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "m") {
         event.preventDefault();
         openReconfigure();
       }
@@ -764,6 +778,57 @@
     }
 
     return `${bossName} | ${context.slice(0, 120)}`;
+  }
+
+  function getBossPrimaryName(anchor) {
+    return String(anchor?.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function findListedBossNameMatch(anchor) {
+    const bossNameNorm = normalize(getBossPrimaryName(anchor));
+    const contextNorm = normalize(getContextText(anchor));
+    if (!bossNameNorm && !contextNorm) {
+      return "";
+    }
+
+    for (const listedBossName of LISTED_BOSS_NAMES) {
+      const listedNorm = normalize(listedBossName);
+      if (!listedNorm || !LISTED_BOSS_NAME_SET.has(listedNorm)) {
+        continue;
+      }
+
+      if (
+        bossNameNorm === listedNorm ||
+        bossNameNorm.includes(listedNorm) ||
+        contextNorm.includes(listedNorm)
+      ) {
+        return listedBossName;
+      }
+    }
+
+    return "";
+  }
+
+  function isBossAllowedByNameFilter(anchor) {
+    const matchedBossName = findListedBossNameMatch(anchor);
+    return OPEN_LISTED_BOSSES_ONLY ? Boolean(matchedBossName) : !matchedBossName;
+  }
+
+  function describeBossNameFilter(anchor) {
+    const matchedBossName = findListedBossNameMatch(anchor);
+    const bossName = getBossPrimaryName(anchor) || "Boss";
+
+    if (OPEN_LISTED_BOSSES_ONLY) {
+      return matchedBossName
+        ? `Elder da lista detectado: ${matchedBossName}.`
+        : `Boss fora da lista de elders ignorado: ${bossName}.`;
+    }
+
+    return matchedBossName
+      ? `Elder da lista ignorado: ${matchedBossName}.`
+      : `Boss fora da lista de elders liberado: ${bossName}.`;
   }
 
   function getChatMessageTimeText(anchor) {
@@ -883,6 +948,7 @@
       if (
         context.includes(keywordNorm) &&
         context.includes("boss") &&
+        isBossAllowedByNameFilter(anchor) &&
         (
           context.includes("waitingforyou") ||
           context.includes("apareceu") ||
@@ -943,6 +1009,7 @@
     return (
       !ignoredKeys.has(buildAnchorKey(anchor)) &&
       contextMatch &&
+      isBossAllowedByNameFilter(anchor) &&
       looksLikeBossLink
     );
   }
@@ -1189,7 +1256,7 @@
   async function run() {
     installControls();
     if (!loadEnabled()) {
-      log("Boss Auto pausado.");
+      log("Boss Com pausado.");
       return;
     }
     const config = promptConfig(false);
@@ -1219,6 +1286,12 @@
 
       const bossText = getBossDisplayText(bossAnchor);
       const bossKey = buildAnchorKey(bossAnchor);
+      if (!isBossAllowedByNameFilter(bossAnchor)) {
+        state.seenKeys.add(bossKey);
+        log(describeBossNameFilter(bossAnchor));
+        return false;
+      }
+
       if (state.seenKeys.has(bossKey)) {
         return false;
       }
@@ -1300,7 +1373,7 @@
         processing = false;
         finished = true;
         if (!success && finalMessage) {
-          log(`Boss Auto finalizado: ${finalMessage}`);
+          log(`Boss Com finalizado: ${finalMessage}`);
         }
         return;
       }
@@ -1343,7 +1416,7 @@
             processing = false;
             finished = true;
             if (!success && finalMessage) {
-              log(`Boss Auto finalizado: ${finalMessage}`);
+              log(`Boss Com finalizado: ${finalMessage}`);
             }
             return;
           }
@@ -1363,7 +1436,7 @@
         const success = await tryBossSequence(liveBoss);
         finished = true;
         if (!success && finalMessage) {
-          log(`Boss Auto finalizado: ${finalMessage}`);
+          log(`Boss Com finalizado: ${finalMessage}`);
         }
         return;
       }
@@ -1385,7 +1458,7 @@
   }
 
   run().catch((error) => {
-    console.error("[Lamentosa Boss Auto] erro inesperado", error);
+    console.error("[Lamentosa Boss Com] erro inesperado", error);
     showToast(`Erro: ${error?.message || error}`);
   });
 })();

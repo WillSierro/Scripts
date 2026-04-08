@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lamentosa Boss Join
 // @namespace    codex.lamentosa
-// @version      3.3.2
+// @version      3.4.1
 // @description  Le o chat do boss por categoria e entra automaticamente no lobby seguindo a regra 1/2/3/4.
 // @match        *://*/*
 // @run-at       document-idle
@@ -35,11 +35,12 @@
   ].join(", ");
   const TIMER_SELECTOR = "#fieldTimer";
   const TEMPLE_PATH = "/temple/main-room/";
-  const POLL_INTERVAL_MS = 200;
+  const POLL_INTERVAL_MS = 60;
+  const JOIN_SPAM_CLICK_INTERVAL_MS = 45;
   const DEFAULT_MAX_ENTRIES = 4;
   const FIRST_TURN_WINDOW_START_TIME = "00:02:00";
-  const FIRST_TURN_WINDOW_END_TIME = "00:01:59";
-  const FOLLOWUP_WINDOW_START_TIME = "00:01:48";
+  const FIRST_TURN_WINDOW_END_TIME = "00:01:57";
+  const FOLLOWUP_WINDOW_START_TIME = "00:01:50";
   const FOLLOWUP_WINDOW_END_TIME = "00:01:47";
   const JOIN_FAILURE_SELECTORS = [
     ".alert",
@@ -83,6 +84,12 @@
     chatClickTriggered: false,
     chatSeeded: false,
     buttonNode: null,
+    joinSpam: {
+      lobbyKey: "",
+      turn: 0,
+      lastClickAt: 0,
+      clickCount: 0,
+    },
   };
 
   function normalizeText(value) {
@@ -666,6 +673,12 @@
     state.chatClickTriggered = false;
     state.chatSeeded = false;
     state.seenChatKeys.clear();
+    state.joinSpam = {
+      lobbyKey: "",
+      turn: 0,
+      lastClickAt: 0,
+      clickCount: 0,
+    };
     showToast("Contagem do Boss Join resetada.", true);
   }
 
@@ -801,36 +814,6 @@
     state.chatSeeded = true;
   }
 
-  function tryOpenCurrentBossFromChat(chatList, config) {
-    if (state.chatClickTriggered) {
-      return false;
-    }
-
-    const matchingNodes = Array.from(chatList.children).filter((node) => node instanceof HTMLElement);
-    for (let index = matchingNodes.length - 1; index >= 0; index -= 1) {
-      const node = matchingNodes[index];
-      const bossAnchor = findMatchingBossAnchor(node, config);
-      if (!bossAnchor) {
-        continue;
-      }
-
-      const chatKey = buildChatKey(bossAnchor);
-      if (chatKey) {
-        state.seenChatKeys.add(chatKey);
-      }
-
-      state.chatClickTriggered = true;
-      showToast(
-        `Boss ${config.categoryLabel} ja estava no chat. Abrindo o link do boss agora.`,
-        true
-      );
-      activateElement(bossAnchor);
-      return true;
-    }
-
-    return false;
-  }
-
   function ensureChatObserver(config) {
     if (state.chatObserver) {
       return;
@@ -846,12 +829,9 @@
 
     if (!state.chatListReady) {
       state.chatListReady = true;
-      if (tryOpenCurrentBossFromChat(chatList, config)) {
-        return;
-      }
       seedExistingChat(chatList, config);
       showToast(
-        `Chat pronto. Esperando nova mensagem do boss ${config.categoryLabel}/${config.keyword}.`,
+        `Chat pronto. Mensagens antigas foram ignoradas. Esperando nova mensagem do boss ${config.categoryLabel}/${config.keyword}.`,
         true
       );
     }
@@ -898,12 +878,12 @@
     button.textContent = "Boss Join";
     button.title =
       "Clique esquerdo liga/desliga. Clique direito configura. Ctrl+Alt+J configura. Ctrl+Alt+K reseta a contagem.";
-    button.style.minWidth = "150px";
-    button.style.padding = "8px 12px";
+    button.style.minWidth = "108px";
+    button.style.padding = "6px 10px";
     button.style.border = "0";
     button.style.borderRadius = "999px";
     button.style.color = "#fff";
-    button.style.font = "600 12px/1 Arial, sans-serif";
+    button.style.font = "600 11px/1 Arial, sans-serif";
     button.style.boxShadow = "0 6px 24px rgba(0, 0, 0, 0.3)";
     button.style.cursor = "pointer";
     state.buttonNode = button;
@@ -976,6 +956,12 @@
       healReturnUrl: runtime.healReturnUrl || "",
     };
     saveRuntime(nextRuntime);
+    state.joinSpam = {
+      lobbyKey: "",
+      turn: 0,
+      lastClickAt: 0,
+      clickCount: 0,
+    };
     return nextRuntime;
   }
 
@@ -993,6 +979,61 @@
       healReturnUrl: runtime.healReturnUrl || "",
     };
     saveRuntime(nextRuntime);
+    state.joinSpam = {
+      lobbyKey: "",
+      turn: 0,
+      lastClickAt: 0,
+      clickCount: 0,
+    };
+    return nextRuntime;
+  }
+
+  function getTurnWindow(config, currentTurn) {
+    if (currentTurn === 1) {
+      return {
+        startSeconds: config.firstTurnWindowStartSeconds,
+        endSeconds: config.firstTurnWindowEndSeconds,
+        label: `${config.firstTurnWindowStartTime} -> ${config.firstTurnWindowEndTime}`,
+      };
+    }
+
+    return {
+      startSeconds: config.windowStartSeconds,
+      endSeconds: config.windowEndSeconds,
+      label: `${config.windowStartTime} -> ${config.windowEndTime}`,
+    };
+  }
+
+  function clickJoinBurst(config, runtime, lobbyKey, currentTurn, joinButton, timerText) {
+    const now = Date.now();
+    if (state.joinSpam.lobbyKey !== lobbyKey || state.joinSpam.turn !== currentTurn) {
+      state.joinSpam = {
+        lobbyKey,
+        turn: currentTurn,
+        lastClickAt: 0,
+        clickCount: 0,
+      };
+    }
+
+    if (now - state.joinSpam.lastClickAt < JOIN_SPAM_CLICK_INTERVAL_MS) {
+      return runtime;
+    }
+
+    let nextRuntime = runtime;
+    if (runtime.pendingJoinLobbyKey !== lobbyKey) {
+      nextRuntime = markClick(runtime, lobbyKey);
+    }
+
+    state.joinSpam.lastClickAt = now;
+    state.joinSpam.clickCount += 1;
+    activateElement(joinButton);
+
+    const clickWord = state.joinSpam.clickCount === 1 ? "clique" : "cliques";
+    showToast(
+      `Spamando Entrar na vez ${currentTurn}/${config.maxEntries}. ${state.joinSpam.clickCount} ${clickWord}. Timer ${timerText || "--"}.`,
+      true
+    );
+
     return nextRuntime;
   }
 
@@ -1085,11 +1126,12 @@
 
   function processJoin(config, joinButton) {
     const lobbyKey = getLobbyKey(joinButton);
-    const runtime = getRuntimeForLobby(lobbyKey);
+    let runtime = getRuntimeForLobby(lobbyKey);
     const currentTurn = getCurrentTurn(runtime);
     const timerElement = getTimerElement();
     const timerText = String(timerElement?.textContent || "").trim();
     const timerSeconds = parseTimerText(timerText);
+    const turnWindow = getTurnWindow(config, currentTurn);
 
     if (runtime.successfulEntries >= config.maxEntries) {
       stopWatcher(
@@ -1100,44 +1142,20 @@
 
     showToast(describeWaitingState(config, runtime, timerText));
 
-    if (runtime.pendingJoinLobbyKey === lobbyKey) {
+    if (runtime.attemptedLobbyKey === lobbyKey && runtime.pendingJoinLobbyKey !== lobbyKey) {
       return;
     }
 
-    if (runtime.attemptedLobbyKey === lobbyKey) {
+    if (!isWithinTimerWindow(timerSeconds, turnWindow.startSeconds, turnWindow.endSeconds)) {
       return;
     }
 
-    if (currentTurn === 1) {
-      if (
-        !isWithinTimerWindow(
-          timerSeconds,
-          config.firstTurnWindowStartSeconds,
-          config.firstTurnWindowEndSeconds
-        )
-      ) {
-        return;
-      }
-
-      markClick(runtime, lobbyKey);
-      activateElement(joinButton);
-      showToast(
-        `Tentando entrar na vez 1/${config.maxEntries} para ${config.categoryLabel}.`,
-        true
-      );
-      return;
-    }
-
-    if (!isWithinTimerWindow(timerSeconds, config.windowStartSeconds, config.windowEndSeconds)) {
-      return;
-    }
-
-    markClick(runtime, lobbyKey);
-    activateElement(joinButton);
-    showToast(
-      `Tentando entrar na vez ${currentTurn}/${config.maxEntries} para ${config.categoryLabel} dentro da janela ${config.windowStartTime} -> ${config.windowEndTime}.`,
-      true
-    );
+    runtime = clickJoinBurst(config, runtime, lobbyKey, currentTurn, joinButton, timerText);
+    const burstLabel =
+      currentTurn === 1
+        ? `Tentando entrar o mais rapido possivel na vez 1/${config.maxEntries}. Janela ${turnWindow.label}.`
+        : `Tentando entrar na vez ${currentTurn}/${config.maxEntries} com spam na janela ${turnWindow.label}.`;
+    showToast(burstLabel, true);
   }
 
   function tick(config) {
