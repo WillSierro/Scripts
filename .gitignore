@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+monitor_externo/.env
+monitor_externo/.playwright-profile/
+monitor_externo/data/state.json
+monitor_externo/__pycache__/
