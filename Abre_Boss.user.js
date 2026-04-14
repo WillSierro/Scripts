@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         Lamentosa Abre Boss
 // @namespace    codex.lamentosa
-// @version      1.0.0
+// @version      1.0.3
 // @description  Monitora o chat do boss, abre o boss, clica em Desafiar e depois no OK, sem escolha de sessao.
 // @match        *://*/*
 // @run-at       document-idle
@@ -39,6 +39,9 @@
   const CHAT_POLL_INTERVAL_MS = 250;
   const CHAT_WAIT_LOG_INTERVAL_MS = 10000;
   const BOSS_SCAN_INTERVAL_MS = 250;
+  const MINUTE_RELOAD_START_SECOND = 55;
+  const MINUTE_RELOAD_END_SECOND = 1;
+  const RELOAD_GUARD_STORAGE_KEY = "lamentosaAbreBossReloadMinute";
   const MODAL_SELECTORS = [
     ".modal.show",
     ".modal.in",
@@ -94,6 +97,7 @@
     seenKeys: new Set(),
     buttonNode: null,
     hoverIntervalId: null,
+    reloadScheduled: false,
   };
 
   function log(message) {
@@ -706,6 +710,59 @@
     return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
   }
 
+  function getCurrentClockDate() {
+    const snapshot = getServerClockSnapshot();
+    return snapshot ? new Date(snapshot.serverNowMs) : new Date();
+  }
+
+  function buildMinuteKey(date) {
+    return [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, "0"),
+      String(date.getDate()).padStart(2, "0"),
+      String(date.getHours()).padStart(2, "0"),
+      String(date.getMinutes()).padStart(2, "0"),
+    ].join("-");
+  }
+
+  function getLastReloadMinuteKey() {
+    try {
+      return sessionStorage.getItem(RELOAD_GUARD_STORAGE_KEY) || state.reloadScheduled;
+    } catch (error) {
+      return state.reloadScheduled;
+    }
+  }
+
+  function setLastReloadMinuteKey(minuteKey) {
+    state.reloadScheduled = minuteKey;
+    try {
+      sessionStorage.setItem(RELOAD_GUARD_STORAGE_KEY, minuteKey);
+    } catch (error) {
+      // Ignora quando o navegador bloquear sessionStorage.
+    }
+  }
+
+  function scheduleMinuteRefresh() {
+    const clockDate = getCurrentClockDate();
+    const seconds = clockDate.getSeconds();
+    if (seconds < MINUTE_RELOAD_START_SECOND && seconds > MINUTE_RELOAD_END_SECOND) {
+      return false;
+    }
+
+    const minuteKey = buildMinuteKey(clockDate);
+    if (getLastReloadMinuteKey() === minuteKey) {
+      return false;
+    }
+
+    setLastReloadMinuteKey(minuteKey);
+    const clockLabel = clockDate.toLocaleTimeString();
+    log(`Virada do minuto em ${clockLabel}. Recarregando para refrescar o link do boss.`);
+    window.setTimeout(() => {
+      location.reload();
+    }, 150);
+    return true;
+  }
+
   async function waitUntilWindow(windowInfo) {
     if (Date.now() >= windowInfo.startMs) {
       log("Ja estamos dentro da janela. Monitorando agora.");
@@ -911,7 +968,11 @@
   }
 
   function buildAnchorKey(anchor) {
-    return `${getBossLinkValue(anchor) || normalize(anchor.textContent || "")}|${normalize(getContextText(anchor))}`;
+    return [
+      getBossLinkValue(anchor) || normalize(anchor.textContent || ""),
+      getChatMessageTimeText(anchor),
+      normalize(getContextText(anchor)),
+    ].join("|");
   }
 
   function isBossContextMatch(context, keywordNorm) {
@@ -1186,18 +1247,7 @@
     };
   }
 
-  async function run() {
-    installControls();
-    if (!loadEnabled()) {
-      log("Abre Boss pausado.");
-      return;
-    }
-    const config = promptConfig(false);
-    if (!config) {
-      log("Configuracao cancelada.");
-      return;
-    }
-
+  async function monitorBossWindow(config) {
     const windowInfo = computeWindow(config);
     await waitUntilWindow(windowInfo);
 
@@ -1355,6 +1405,10 @@
 
     let lastLogAt = 0;
     while (Date.now() <= windowInfo.endMs && !completed && !finished) {
+      if (scheduleMinuteRefresh()) {
+        return;
+      }
+
       const liveBoss =
         findBossChatMessageAnchor(config.keyword, state.seenKeys, chatList) ||
         findMatchingBossAnchorInChatList(config.keyword, state.seenKeys, chatList, windowInfo);
@@ -1382,6 +1436,39 @@
       return;
     }
     log("A janela terminou sem detectar um boss compativel.");
+  }
+
+  async function run() {
+    installControls();
+
+    while (true) {
+      if (!loadEnabled()) {
+        log("Abre Boss pausado.");
+        return;
+      }
+
+      const config = loadSavedConfig() || promptConfig(false);
+      if (!config) {
+        log("Configuracao cancelada.");
+        return;
+      }
+
+      state.reloadScheduled = false;
+      state.seenKeys.clear();
+      await monitorBossWindow(config);
+
+      if (state.reloadScheduled) {
+        return;
+      }
+
+      if (!loadEnabled()) {
+        log("Abre Boss pausado.");
+        return;
+      }
+
+      log("Ciclo encerrado. Preparando a proxima janela.");
+      await sleep(1000);
+    }
   }
 
   run().catch((error) => {
